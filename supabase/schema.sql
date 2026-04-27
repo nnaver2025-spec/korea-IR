@@ -48,6 +48,7 @@ create table if not exists events (
   event_type event_type not null default 'unknown',
   source event_source not null,
   source_url text not null,
+  disclosed_at timestamptz,
   starts_at timestamptz not null,
   ends_at timestamptz,
   timezone text not null default 'Asia/Seoul',

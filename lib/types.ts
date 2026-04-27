@@ -47,6 +47,7 @@ export interface IrEvent {
   eventType: EventType;
   source: EventSource;
   sourceUrl: string;
+  disclosedAt?: string;
   startsAt: string;
   endsAt?: string;
   timezone: "Asia/Seoul";

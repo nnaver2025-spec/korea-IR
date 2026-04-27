@@ -1,4 +1,5 @@
 import { createEventDedupeKey } from "@/lib/dedupe";
+import { classifyDartEventType } from "@/lib/normalize";
 import type { EventType, EventWithCompany, IrEvent } from "@/lib/types";
 
 const dartListEndpoint = "https://opendart.fss.or.kr/api/list.json";
@@ -31,23 +32,33 @@ export interface DartAdapterOptions {
   endDate?: string;
   pageNo?: number;
   pageCount?: number;
+  corpCode?: string;
+  finalReportOnly?: boolean;
 }
 
 export async function listRecentDartFilings(options: DartAdapterOptions): Promise<DartFiling[]> {
-  const apiKey = options.apiKey ?? process.env.OPEN_DART_API_KEY;
+  const apiKey = options.apiKey ?? getOpenDartApiKey();
   if (!apiKey) {
-    throw new Error("OPEN_DART_API_KEY is required for live DART calls.");
+    throw new Error("OPEN_DART_API_KEY or DART_API_KEY is required for live DART calls.");
+  }
+  assertDartDate(options.beginDate, "beginDate");
+  if (options.endDate) {
+    assertDartDate(options.endDate, "endDate");
   }
 
   const params = new URLSearchParams({
     crtfc_key: apiKey,
     bgn_de: options.beginDate,
     page_no: String(options.pageNo ?? 1),
-    page_count: String(options.pageCount ?? 100)
+    page_count: String(options.pageCount ?? 100),
+    last_reprt_at: options.finalReportOnly === false ? "N" : "Y"
   });
 
   if (options.endDate) {
     params.set("end_de", options.endDate);
+  }
+  if (options.corpCode) {
+    params.set("corp_code", options.corpCode);
   }
 
   const response = await fetch(`${dartListEndpoint}?${params.toString()}`, {
@@ -64,6 +75,9 @@ export async function listRecentDartFilings(options: DartAdapterOptions): Promis
   }
 
   const payload = (await response.json()) as DartListResponse;
+  if (payload.status === "013") {
+    return [];
+  }
   if (payload.status !== "000") {
     throw new Error(`DART returned ${payload.status}: ${payload.message}`);
   }
@@ -71,13 +85,7 @@ export async function listRecentDartFilings(options: DartAdapterOptions): Promis
   return payload.list ?? [];
 }
 
-export function classifyDartEventType(reportName: string): EventType {
-  if (reportName.includes("잠정") || reportName.includes("매출액또는손익구조")) return "provisional_earnings";
-  if (reportName.includes("실적") || reportName.includes("영업실적")) return "earnings_release";
-  if (reportName.includes("기업설명회") || reportName.includes("IR")) return "ir_meeting";
-  if (reportName.includes("분기보고서") || reportName.includes("반기보고서") || reportName.includes("사업보고서")) return "business_report";
-  return "unknown";
-}
+export { classifyDartEventType };
 
 export function dartReceiptUrl(receiptNo: string) {
   return `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${encodeURIComponent(receiptNo)}`;
@@ -110,4 +118,39 @@ export function mapDartFilingToEventDraft(filing: DartFiling, companyId: string)
 export function mergeDartEventsWithoutDuplicates(existing: EventWithCompany[], incoming: EventWithCompany[]) {
   const existingKeys = new Set(existing.map((event) => event.dedupeKey));
   return [...existing, ...incoming.filter((event) => !existingKeys.has(event.dedupeKey))];
+}
+
+export function hasOpenDartApiKey() {
+  return Boolean(getOpenDartApiKey());
+}
+
+export function getOpenDartApiKey() {
+  return process.env.OPEN_DART_API_KEY || process.env.DART_API_KEY;
+}
+
+export function toDartDate(date: Date) {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  return formatter.format(date).replaceAll("-", "");
+}
+
+export function getDefaultDartDateRange(daysBack = 14) {
+  const end = new Date();
+  const begin = new Date(end);
+  begin.setDate(begin.getDate() - daysBack);
+
+  return {
+    beginDate: toDartDate(begin),
+    endDate: toDartDate(end)
+  };
+}
+
+function assertDartDate(value: string, label: string) {
+  if (!/^\d{8}$/.test(value)) {
+    throw new Error(`${label} must be YYYYMMDD.`);
+  }
 }

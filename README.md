@@ -38,12 +38,49 @@ OPENAI_API_KEY=
 NEXT_PUBLIC_DATA_MODE=mock
 ```
 
+## DART live mode
+
+OpenDART에서 발급받은 API 키를 `.env.local`에 설정하면 실제 공시 목록을 불러올 수 있습니다. 기존 환경과의 호환을 위해 `OPEN_DART_API_KEY`와 `DART_API_KEY`를 모두 지원합니다.
+
+```bash
+OPEN_DART_API_KEY=발급받은_키
+# or
+DART_API_KEY=발급받은_키
+npm run dev
+```
+
+대시보드 상단 필터에서 `DART live`를 선택한 뒤 기간을 지정합니다. 키가 없거나 DART API가 실패하면 앱은 종료되지 않고 상태 메시지와 `crawl_logs` 패널에 실패/건너뜀 로그를 표시합니다.
+
+API를 직접 테스트할 수도 있습니다.
+
+```bash
+curl "http://localhost:3000/api/dart/filings?beginDate=20260401&endDate=20260427&pageCount=20"
+```
+
+응답에는 원시 `filings`와 앱에서 쓰는 `events` 모델이 함께 포함됩니다.
+
+- `sourceUrl`: DART 원문 링크
+- `disclosedAt`: DART 접수일 기준 공시 시각
+- `company.name`: 회사명
+- `company.ticker`: 종목코드
+- `title`: 공시 제목
+- `eventType`: 공시 제목 기반 분류 결과
+- `crawlLog`: 수집 성공/실패/중복 건수
+
+현재 제목 분류 규칙은 다음과 같습니다.
+
+- `기업설명회(IR)개최`, `기업설명회 개최`: `ir_meeting`
+- `영업(잠정)실적`, `연결재무제표기준영업(잠정)실적`: `provisional_earnings`
+- `결산실적공시`, `매출액 또는 손익구조 변경`: `earnings_release`
+- `분기보고서`, `반기보고서`, `사업보고서`: `business_report`
+- 기타: `unknown`
+
 ## 데이터 모델
 
 Supabase Postgres 스키마는 `supabase/schema.sql`에 있습니다.
 
 - `companies`: 종목코드, 회사명, 시장, 업종, IR URL, DART corp code
-- `events`: 이벤트 일정, 타입, 소스, 원문 URL, 상태, 중복 방지 키
+- `events`: 이벤트 일정, 타입, 소스, 원문 URL, 공시 시각, 상태, 중복 방지 키
 - `materials`: PDF/웹캐스트/자료 링크와 요약 상태
 - `watchlist`: 관심종목과 알림 선호
 - `alerts`: 이벤트별 알림 발송 상태

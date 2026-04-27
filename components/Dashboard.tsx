@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertCircle, CalendarDays, Search } from "lucide-react";
+import { AlertCircle, CalendarDays, Database, RefreshCw, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import CrawlLogPanel from "@/components/CrawlLogPanel";
 import EventCard from "@/components/EventCard";
@@ -11,23 +11,54 @@ import type { CrawlLog, EventSource, EventType, EventWithCompany } from "@/lib/t
 
 const watchlistStorageKey = "korea-ir-watchlist";
 
+type DataMode = "mock" | "dart";
+
+interface DartFilingsApiResponse {
+  mode: "live" | "missing_key" | "unavailable";
+  hasApiKey: boolean;
+  dateRange: {
+    beginDate: string;
+    endDate: string;
+  };
+  events: EventWithCompany[];
+  crawlLog: CrawlLog;
+  message?: string;
+  error?: string;
+}
+
+interface DartStatus {
+  tone: "idle" | "loading" | "success" | "warning" | "error" | "empty";
+  message: string;
+}
+
 interface DashboardProps {
   events: EventWithCompany[];
   crawlLogs: CrawlLog[];
 }
 
 export default function Dashboard({ events, crawlLogs }: DashboardProps) {
+  const initialDateRange = getInitialDateRange();
   const [query, setQuery] = useState("");
   const [eventType, setEventType] = useState<EventType | "all">("all");
   const [source, setSource] = useState<EventSource | "all">("all");
-  const [watchedCompanyIds, setWatchedCompanyIds] = useState<string[]>([]);
+  const [dataMode, setDataMode] = useState<DataMode>("mock");
+  const [watchedOnly, setWatchedOnly] = useState(false);
+  const [watchedCompanyKeys, setWatchedCompanyKeys] = useState<string[]>([]);
   const [isLoadingWatchlist, setIsLoadingWatchlist] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [dartBeginDate, setDartBeginDate] = useState(initialDateRange.beginDate);
+  const [dartEndDate, setDartEndDate] = useState(initialDateRange.endDate);
+  const [dartEvents, setDartEvents] = useState<EventWithCompany[]>([]);
+  const [dartCrawlLogs, setDartCrawlLogs] = useState<CrawlLog[]>([]);
+  const [dartStatus, setDartStatus] = useState<DartStatus>({
+    tone: "idle",
+    message: "DART live 모드를 선택하면 실제 공시를 불러옵니다."
+  });
 
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem(watchlistStorageKey);
-      setWatchedCompanyIds(stored ? JSON.parse(stored) : []);
+      setWatchedCompanyKeys(stored ? JSON.parse(stored) : []);
     } catch {
       setLoadError("관심종목을 불러오지 못했습니다. 브라우저 저장소를 확인하세요.");
     } finally {
@@ -37,13 +68,24 @@ export default function Dashboard({ events, crawlLogs }: DashboardProps) {
 
   useEffect(() => {
     if (!isLoadingWatchlist) {
-      window.localStorage.setItem(watchlistStorageKey, JSON.stringify(watchedCompanyIds));
+      window.localStorage.setItem(watchlistStorageKey, JSON.stringify(watchedCompanyKeys));
     }
-  }, [isLoadingWatchlist, watchedCompanyIds]);
+  }, [isLoadingWatchlist, watchedCompanyKeys]);
+
+  useEffect(() => {
+    if (dataMode !== "dart") return;
+    const controller = new AbortController();
+    loadDartEvents(controller.signal);
+    return () => controller.abort();
+  }, [dataMode, dartBeginDate, dartEndDate]);
+
+  const displayedEvents = dataMode === "mock" ? events : dartEvents;
+  const displayedCrawlLogs = dataMode === "mock" ? crawlLogs : dartCrawlLogs;
+  const watchlistEvents = [...events, ...dartEvents];
 
   const filteredEvents = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    return events.filter((event) => {
+    return displayedEvents.filter((event) => {
       const matchesQuery =
         normalizedQuery.length === 0 ||
         event.title.toLowerCase().includes(normalizedQuery) ||
@@ -51,20 +93,68 @@ export default function Dashboard({ events, crawlLogs }: DashboardProps) {
         event.company.ticker.includes(normalizedQuery);
       const matchesType = eventType === "all" || event.eventType === eventType;
       const matchesSource = source === "all" || event.source === source;
-      return matchesQuery && matchesType && matchesSource;
+      const matchesWatchlist = !watchedOnly || isWatchedCompany(event);
+      return matchesQuery && matchesType && matchesSource && matchesWatchlist;
     });
-  }, [eventType, events, query, source]);
+  }, [displayedEvents, eventType, query, source, watchedCompanyKeys, watchedOnly]);
 
   const buckets = useMemo(() => {
     return {
       today: filteredEvents.filter((event) => getEventBucket(event.startsAt) === "today"),
       thisWeek: filteredEvents.filter((event) => getEventBucket(event.startsAt) === "thisWeek"),
-      nextWeek: filteredEvents.filter((event) => getEventBucket(event.startsAt) === "nextWeek")
+      nextWeek: filteredEvents.filter((event) => getEventBucket(event.startsAt) === "nextWeek"),
+      later: filteredEvents.filter((event) => getEventBucket(event.startsAt) === "later")
     };
   }, [filteredEvents]);
 
-  function toggleWatch(companyId: string) {
-    setWatchedCompanyIds((current) => (current.includes(companyId) ? current.filter((id) => id !== companyId) : [...current, companyId]));
+  async function loadDartEvents(signal?: AbortSignal) {
+    setDartStatus({
+      tone: "loading",
+      message: "DART 공시를 불러오는 중입니다."
+    });
+
+    try {
+      const params = new URLSearchParams({
+        beginDate: dateInputToDartDate(dartBeginDate),
+        endDate: dateInputToDartDate(dartEndDate),
+        pageCount: "100"
+      });
+      const response = await fetch(`/api/dart/filings?${params.toString()}`, { signal });
+      const payload = (await response.json()) as DartFilingsApiResponse;
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? "DART API 요청이 실패했습니다.");
+      }
+
+      setDartEvents(payload.events);
+      setDartCrawlLogs([payload.crawlLog]);
+      setDartStatus({
+        tone: getDartStatusTone(payload),
+        message: payload.error ?? payload.message ?? `DART 공시 ${payload.events.length}건을 불러왔습니다.`
+      });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setDartEvents([]);
+      setDartStatus({
+        tone: "error",
+        message: error instanceof Error ? error.message : "DART API 요청 중 알 수 없는 오류가 발생했습니다."
+      });
+    }
+  }
+
+  function isWatchedCompany(event: EventWithCompany) {
+    const keys = getCompanyWatchKeys(event);
+    return keys.some((key) => watchedCompanyKeys.includes(key));
+  }
+
+  function toggleWatch(event: EventWithCompany) {
+    const keys = getCompanyWatchKeys(event);
+    const primaryKey = event.company.ticker || event.company.id;
+    setWatchedCompanyKeys((current) => (keys.some((key) => current.includes(key)) ? current.filter((key) => !keys.includes(key)) : [...current, primaryKey]));
+  }
+
+  function removeWatch(companyKey: string) {
+    setWatchedCompanyKeys((current) => current.filter((key) => key !== companyKey));
   }
 
   return (
@@ -93,7 +183,7 @@ export default function Dashboard({ events, crawlLogs }: DashboardProps) {
         ) : null}
 
         <section className="mb-5 rounded-lg border border-line bg-white p-4 shadow-panel">
-          <div className="grid gap-3 lg:grid-cols-[1fr_220px_220px]">
+          <div className="grid gap-3 lg:grid-cols-[1fr_180px_180px_180px]">
             <label className="relative block">
               <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" size={18} />
               <input
@@ -103,6 +193,10 @@ export default function Dashboard({ events, crawlLogs }: DashboardProps) {
                 value={query}
               />
             </label>
+            <select className="focus-ring h-11 rounded-md border border-line bg-white px-3 text-sm" onChange={(event) => setDataMode(event.target.value as DataMode)} value={dataMode}>
+              <option value="mock">Mock 데이터</option>
+              <option value="dart">DART live</option>
+            </select>
             <select className="focus-ring h-11 rounded-md border border-line bg-white px-3 text-sm" onChange={(event) => setEventType(event.target.value as EventType | "all")} value={eventType}>
               <option value="all">전체 이벤트</option>
               {Object.entries(eventTypeLabels).map(([value, label]) => (
@@ -120,21 +214,57 @@ export default function Dashboard({ events, crawlLogs }: DashboardProps) {
               ))}
             </select>
           </div>
+
+          <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3">
+            {dataMode === "dart" ? (
+              <>
+                <label className="text-xs font-semibold text-muted">
+                  시작일
+                  <input className="focus-ring ml-2 h-9 rounded-md border border-line px-2 text-sm text-ink" onChange={(event) => setDartBeginDate(event.target.value)} type="date" value={dartBeginDate} />
+                </label>
+                <label className="text-xs font-semibold text-muted">
+                  종료일
+                  <input className="focus-ring ml-2 h-9 rounded-md border border-line px-2 text-sm text-ink" onChange={(event) => setDartEndDate(event.target.value)} type="date" value={dartEndDate} />
+                </label>
+                <button
+                  className="focus-ring inline-flex h-9 items-center gap-2 rounded-md border border-line px-3 text-sm font-semibold text-ink hover:border-teal-300"
+                  disabled={dartStatus.tone === "loading"}
+                  onClick={() => loadDartEvents()}
+                  type="button"
+                >
+                  <RefreshCw className={dartStatus.tone === "loading" ? "animate-spin" : ""} size={15} />
+                  새로고침
+                </button>
+              </>
+            ) : null}
+            <label className="ml-auto inline-flex h-9 items-center gap-2 rounded-md border border-line px-3 text-sm font-semibold text-ink">
+              <input checked={watchedOnly} className="h-4 w-4 accent-teal-700" onChange={(event) => setWatchedOnly(event.target.checked)} type="checkbox" />
+              관심종목만
+            </label>
+          </div>
         </section>
+
+        {dataMode === "dart" ? (
+          <div className={`mb-4 flex items-center gap-2 rounded-lg border px-4 py-3 text-sm font-semibold ${getStatusClassName(dartStatus.tone)}`}>
+            <Database size={17} />
+            {dartStatus.message}
+          </div>
+        ) : null}
 
         <div className="grid gap-5 lg:grid-cols-[1fr_320px]">
           <div className="space-y-5">
-            <EventSection events={buckets.today} isWatched={(companyId) => watchedCompanyIds.includes(companyId)} onToggleWatch={toggleWatch} title="오늘" />
-            <EventSection events={buckets.thisWeek} isWatched={(companyId) => watchedCompanyIds.includes(companyId)} onToggleWatch={toggleWatch} title="이번 주" />
-            <EventSection events={buckets.nextWeek} isWatched={(companyId) => watchedCompanyIds.includes(companyId)} onToggleWatch={toggleWatch} title="다음 주" />
+            <EventSection detailEnabled={dataMode === "mock"} events={buckets.today} isWatched={isWatchedCompany} onToggleWatch={toggleWatch} title="오늘" />
+            <EventSection detailEnabled={dataMode === "mock"} events={buckets.thisWeek} isWatched={isWatchedCompany} onToggleWatch={toggleWatch} title="이번 주" />
+            <EventSection detailEnabled={dataMode === "mock"} events={buckets.nextWeek} isWatched={isWatchedCompany} onToggleWatch={toggleWatch} title="다음 주" />
+            {dataMode === "dart" ? <EventSection detailEnabled={false} events={buckets.later} isWatched={isWatchedCompany} onToggleWatch={toggleWatch} title="선택 기간 기타" /> : null}
           </div>
           <div className="space-y-5">
             {isLoadingWatchlist ? (
               <div className="rounded-lg border border-line bg-white p-4 text-sm text-muted shadow-panel">관심종목을 불러오는 중입니다.</div>
             ) : (
-              <WatchlistPanel events={events} onRemove={toggleWatch} watchedCompanyIds={watchedCompanyIds} />
+              <WatchlistPanel events={watchlistEvents} onRemove={removeWatch} watchedCompanyKeys={watchedCompanyKeys} />
             )}
-            <CrawlLogPanel logs={crawlLogs} />
+            <CrawlLogPanel logs={displayedCrawlLogs} />
           </div>
         </div>
       </div>
@@ -152,14 +282,16 @@ function SummaryMetric({ label, value }: { label: string; value: number }) {
 }
 
 function EventSection({
+  detailEnabled,
   events,
   isWatched,
   onToggleWatch,
   title
 }: {
+  detailEnabled: boolean;
   events: EventWithCompany[];
-  isWatched: (companyId: string) => boolean;
-  onToggleWatch: (companyId: string) => void;
+  isWatched: (event: EventWithCompany) => boolean;
+  onToggleWatch: (event: EventWithCompany) => void;
   title: string;
 }) {
   return (
@@ -176,10 +308,50 @@ function EventSection({
       ) : (
         <div className="space-y-3">
           {events.map((event) => (
-            <EventCard event={event} isWatched={isWatched(event.companyId)} key={event.id} onToggleWatch={onToggleWatch} />
+            <EventCard detailEnabled={detailEnabled} event={event} isWatched={isWatched(event)} key={event.id} onToggleWatch={onToggleWatch} />
           ))}
         </div>
       )}
     </section>
   );
+}
+
+function getCompanyWatchKeys(event: EventWithCompany) {
+  return [event.company.id, event.company.ticker, event.companyId].filter(Boolean);
+}
+
+function getInitialDateRange() {
+  const end = new Date();
+  const begin = new Date(end);
+  begin.setDate(begin.getDate() - 14);
+  return {
+    beginDate: toDateInputValue(begin),
+    endDate: toDateInputValue(end)
+  };
+}
+
+function toDateInputValue(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function dateInputToDartDate(value: string) {
+  return value.replaceAll("-", "");
+}
+
+function getDartStatusTone(payload: DartFilingsApiResponse): DartStatus["tone"] {
+  if (payload.mode === "missing_key") return "warning";
+  if (payload.mode === "unavailable") return "error";
+  if (payload.events.length === 0) return "empty";
+  return "success";
+}
+
+function getStatusClassName(tone: DartStatus["tone"]) {
+  if (tone === "loading") return "border-blue-200 bg-blue-50 text-blue-700";
+  if (tone === "success") return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  if (tone === "warning") return "border-amber-200 bg-amber-50 text-amber-800";
+  if (tone === "error") return "border-rose-200 bg-rose-50 text-rose-700";
+  return "border-zinc-200 bg-zinc-50 text-zinc-700";
 }

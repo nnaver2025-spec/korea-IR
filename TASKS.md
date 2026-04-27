@@ -54,3 +54,17 @@
 - [ ] 기업 IR 사이트별 PDF discovery adapter 추가
 - [ ] Telegram bot token/chat id 설정 후 alert job 구현
 - [ ] OpenAI 기반 PDF 요약 queue/worker 구현
+
+## 2차 작업
+
+- [x] git 원격 저장소 기준 작업 상태 확인
+- [x] DART adapter 날짜 검증, 키 확인, 빈 결과 처리 강화
+- [x] DART filings를 `EventWithCompany` 모델로 normalize
+- [x] 공시 제목 기반 이벤트 타입 분류 규칙 반영
+- [x] `/api/dart/filings`가 `filings`, `events`, `crawlLog`를 함께 반환
+- [x] 대시보드에서 `Mock 데이터`와 `DART live` 선택 가능
+- [x] 관심종목 필터와 DART live 결과 연결
+- [x] DART 키 없음/빈 결과/실패 상태 UI 표시
+- [x] README에 DART API 키 연결 및 테스트 방법 추가
+- [x] `npm run typecheck` 통과
+- [x] `npm run build` 통과
